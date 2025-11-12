@@ -1,4 +1,4 @@
--- Grenade Helper V6 - Final Edition
+-- Grenade Helper V6 - v1.1
 -- Credits:
 --   ShadyRetard - Grenade Helper base
 --   Carter Poe & Agentsix1 - V6 API understanding
@@ -680,6 +680,11 @@ local function showNadeThrows()
     
     for i = 1, #list do
         local t = list[i]
+
+        if t.distance and t.distance > max_distance then
+            goto continue
+        end
+
         local pos = Vector3(t.pos.x, t.pos.y, t.pos.z)
         local is_crouching = t.position:find("crouch") ~= nil
         local zoff = is_crouching and 46 or 64
@@ -770,7 +775,7 @@ local function moveToPosition(cmd, me, target_pos, dist)
     if move_dir.x == 0 and move_dir.y == 0 then return end
     
     local dir_ang = move_dir:Angles()
-    local view_ang = engine.GetViewAngles()
+    local view_ang = cmd:GetViewAngles()
     local yaw_diff = dir_ang.y - view_ang.y
     
     while yaw_diff > 180 do yaw_diff = yaw_diff - 360 end
@@ -1111,7 +1116,7 @@ callbacks.Register("CreateMove", "GH_MOVE", moveEventHandler)
 callbacks.Register("Draw", "GH_DRAW", drawEventHandler)
 
 print("========================================")
-print("[Grenade Helper V6 - Complete] Loaded!")
+print("[Grenade Helper V6] Loaded!")
 print("========================================")
 print("Credits:")
 print("  - ShadyRetard (Grenade Helper base)")
