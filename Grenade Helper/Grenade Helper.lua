@@ -1,8 +1,8 @@
--- Grenade Helper V6
+-- Grenade Helper V6 - Final Edition
 -- Credits:
 --   ShadyRetard - Grenade Helper base
 --   Carter Poe & Agentsix1 - V6 API understanding
---   Ginette - Script Fix & Reconstruction with AI
+--   Ginette - Script optimization & AI reconstruction
 
 --------------------------------
 -- Constants & State
@@ -11,17 +11,66 @@ local THROW_RADIUS = 20
 local DRAW_MARKER_DISTANCE = 100
 local GH_ACTION_COOLDOWN = 30
 local GRENADE_SAVE_FILE_NAME = "grenade_helper_data.dat"
+local GRENADE_DATA_URL = "https://raw.githubusercontent.com/Anybody4506/AMWRV6/refs/heads/main/Grenade%20Helper/grenade_helper_data.dat"
+local SCRIPT_URL = "https://raw.githubusercontent.com/Anybody4506/AMWRV6/refs/heads/main/Grenade%20Helper/Grenade%20Helper.lua"
+local SCRIPT_NAME = "Grenade Helper.lua"
+
+--------------------------------
+-- Early data file check & download
+--------------------------------
+local data_file_exists = false
+
+file.Enumerate(function(filename)
+    if filename == GRENADE_SAVE_FILE_NAME then
+        data_file_exists = true
+        print("[GH] Data file found")
+    end
+end)
+
+if not data_file_exists then
+    print("[GH] Data file not found, downloading...")
+    local body = http.Get(GRENADE_DATA_URL)
+    
+    if body and body ~= "" then
+        file.Write(GRENADE_SAVE_FILE_NAME, body)
+        print("[GH] Data file downloaded successfully!")
+    else
+        print("[GH] ERROR: Failed to download data file!")
+    end
+end
 
 local maps = {}
 local current_map_name = nil
-local last_action = globals.TickCount()
+local last_action = 0
 local jumpthrow_stage = 0
 local jumpthrow_tick = 0
 local screen_w, screen_h = 0, 0
 
+local checking_update = false
+local local_data_hash = ""
+local remote_data_hash = ""
+local local_script_hash = ""
+local remote_script_hash = ""
+local update_window = nil
+local updates_found = {}
+
+-- Walkbot state
+local walkbot_active = false
+local walkbot_target = nil
+local walkbot_target_nade = nil
+local walkbot_start_time = 0
+local WALKBOT_TIMEOUT = 300
+local WALKBOT_STOP_DISTANCE = 0.5
+
 -- Notification system
 local notifications = {}
 local NOTIF_DURATION = 180
+
+-- Movement buttons
+local IN_FORWARD = bit.lshift(1, 3)
+local IN_BACK = bit.lshift(1, 4)
+local IN_MOVELEFT = bit.lshift(1, 9)
+local IN_MOVERIGHT = bit.lshift(1, 10)
 
 --------------------------------
 -- Type definitions
@@ -39,71 +88,7 @@ local GRENADE_IDS = {
 }
 
 --------------------------------
--- UI : VISUALS -> Local -> Groupbox
---------------------------------
-local visuals_ref = gui.Reference("VISUALS", "Local")
-local GH_GB = gui.Groupbox(visuals_ref, "Grenade Helper", 15, 0, 352, 0)
-
-local GH_ENABLED = gui.Checkbox(GH_GB, "gh.enabled", "Enable Grenade Helper", true)
-local GH_NAME_EB = gui.Editbox(GH_GB, "gh.name", "Throw Name")
-local GH_POSITION_CB = gui.Combobox(GH_GB, "gh.position", "Position Type", unpack(POSITION_TYPES))
-local GH_LAUNCH_CB = gui.Combobox(GH_GB, "gh.launch", "Launch Type", unpack(LAUNCH_TYPES))
-
-local GH_ENABLE_KB = gui.Checkbox(GH_GB, "gh.kb.enabled", "Enable Keybinds", true)
-local GH_SAVE_KB = gui.Keybox(GH_GB, "gh.kb.save", "Capture & Save", 97)
-local GH_DEL_KB = gui.Keybox(GH_GB, "gh.kb.del", "Delete Nearest", 98)
-local GH_JUMPTHROW_KB = gui.Keybox(GH_GB, "gh.kb.jumpthrow", "Jump Throw", 70)
-
-local GH_VISUALS_DISTANCE_SL = gui.Slider(GH_GB, "gh.visuals.distance", "Display Distance", 800, 1, 9999)
-local CP_TEXT_NAME = gui.ColorPicker(GH_GB, "gh.color.name", "Throw Name", 255, 255, 0, 255)
-local CP_TEXT_POS = gui.ColorPicker(GH_GB, "gh.color.position", "Position Type", 150, 255, 150, 200)
-local CP_TEXT_LAUNCH = gui.ColorPicker(GH_GB, "gh.color.launch", "Launch Type", 255, 150, 150, 200)
-local CP_LINE = gui.ColorPicker(GH_GB, "gh.color.line", "Direction Line", 0, 255, 255, 220)
-local CP_BOX = gui.ColorPicker(GH_GB, "gh.color.box", "Box Color", 0, 0, 0, 255)
-local CP_FINAL = gui.ColorPicker(GH_GB, "gh.color.final", "Active Box", 0, 255, 100, 255)
-
--- Create file if doesn't exist
-local init_file = file.Open(GRENADE_SAVE_FILE_NAME, "a")
-if init_file then init_file:Close() end
-
---------------------------------
--- Notification System
---------------------------------
-local function addNotification(text, r, g, b)
-    table.insert(notifications, {
-        text = text,
-        r = r or 255,
-        g = g or 255,
-        b = b or 255,
-        expire = globals.TickCount() + NOTIF_DURATION
-    })
-end
-
-local function drawNotifications()
-    local center_x = screen_w / 2
-    local y_offset = screen_h * 0.7
-    
-    for i = #notifications, 1, -1 do
-        local notif = notifications[i]
-        if globals.TickCount() > notif.expire then
-            table.remove(notifications, i)
-        else
-            local alpha = math.min(255, (notif.expire - globals.TickCount()) * 2)
-            local tw, th = draw.GetTextSize(notif.text)
-            
-            draw.Color(0, 0, 0, alpha * 0.7)
-            draw.FilledRect(center_x - tw/2 - 10, y_offset - 5, center_x + tw/2 + 10, y_offset + th + 5)
-            
-            draw.Color(notif.r, notif.g, notif.b, alpha)
-            draw.Text(center_x - tw/2, y_offset, notif.text)
-            
-            y_offset = y_offset + th + 15
-        end
-    end
-end
-
---------------------------------
--- Utils
+-- Utility Functions
 --------------------------------
 local function clamp(x, a, b)
     return math.max(a, math.min(b, x))
@@ -143,21 +128,6 @@ local function to_num2(angles)
     return normalize_angles(pitch, yaw)
 end
 
-local function W2S(pos)
-    if not pos then return nil, nil end
-    
-    if type(pos) == "userdata" then
-        return client.WorldToScreen(pos)
-    end
-    
-    if type(pos) == "table" then
-        local v = Vector3(pos.x or pos[1] or 0, pos.y or pos[2] or 0, pos.z or pos[3] or 0)
-        return client.WorldToScreen(v)
-    end
-    
-    return nil, nil
-end
-
 local function get_origin_v3(ent)
     if not ent then return Vector3(0, 0, 0) end
     
@@ -195,15 +165,69 @@ local function dist3v(a, b)
     return math.sqrt(dx*dx + dy*dy + dz*dz)
 end
 
+local function get_velocity(me)
+    if not me then return 0 end
+    
+    local vel = me:GetFieldVector("m_vecAbsVelocity")
+    if not vel then return 0 end
+    
+    return math.floor(math.min(10000, vel:Length2D() + 0.5))
+end
+
+local function simpleHash(str)
+    if not str or str == "" then return 0 end
+    local hash = 0
+    for i = 1, #str do
+        hash = (hash * 31 + string.byte(str, i)) % 2147483647
+    end
+    return hash
+end
+
+--------------------------------
+-- Notification System
+--------------------------------
+local function addNotification(text, r, g, b)
+    table.insert(notifications, {
+        text = text,
+        r = r or 255,
+        g = g or 255,
+        b = b or 255,
+        expire = globals.TickCount() + NOTIF_DURATION
+    })
+end
+
+local function drawNotifications()
+    local center_x = screen_w / 2
+    local y_offset = screen_h * 0.7
+    
+    for i = #notifications, 1, -1 do
+        local notif = notifications[i]
+        if globals.TickCount() > notif.expire then
+            table.remove(notifications, i)
+        else
+            local alpha = math.min(255, (notif.expire - globals.TickCount()) * 2)
+            local tw, th = draw.GetTextSize(notif.text)
+            
+            draw.Color(0, 0, 0, alpha * 0.7)
+            draw.FilledRect(center_x - tw/2 - 10, y_offset - 5, center_x + tw/2 + 10, y_offset + th + 5)
+            
+            draw.Color(notif.r, notif.g, notif.b, alpha)
+            draw.TextShadow(center_x - tw/2, y_offset, notif.text)
+            
+            y_offset = y_offset + th + 15
+        end
+    end
+end
+
 --------------------------------
 -- Grenade Detection
 --------------------------------
 local function GetActiveGrenadeName()
     local me = entities.GetLocalPlayer()
-    if not me or (me.IsAlive and not me:IsAlive()) then return nil end
+    if not me or not me:IsAlive() then return nil end
     
-    local id = me.GetWeaponID and me:GetWeaponID() or nil
-    return id and GRENADE_IDS[id] or nil
+    local weapon_id = me:GetWeaponID()
+    return weapon_id and GRENADE_IDS[weapon_id] or nil
 end
 
 --------------------------------
@@ -220,7 +244,286 @@ local function GetThrowPositionV3(pos, pitch, yaw, z_offset)
 end
 
 --------------------------------
--- Persistence
+-- Update System Functions (defined before UI)
+--------------------------------
+local function downloadGrenadeData(callback)
+    print("[GH] Downloading grenade data from GitHub...")
+    addNotification("[GH] Downloading data...", 0, 200, 255)
+    
+    http.Get(GRENADE_DATA_URL, function(body)
+        if body and body ~= "" then
+            file.Write(GRENADE_SAVE_FILE_NAME, body)
+            local_data_hash = simpleHash(body)
+            print("[GH] Grenade data downloaded successfully!")
+            addNotification("[GH] Data downloaded!", 0, 255, 100)
+            loadData()
+            if callback then callback(true) end
+        else
+            print("[GH] Error: Empty response from server")
+            addNotification("[GH] Download failed!", 255, 100, 100)
+            if callback then callback(false) end
+        end
+    end)
+end
+
+local function downloadScript(callback)
+    print("[GH] Downloading script from GitHub...")
+    addNotification("[GH] Downloading script...", 0, 200, 255)
+    
+    http.Get(SCRIPT_URL, function(body)
+        if body and body ~= "" then
+            file.Write(SCRIPT_NAME, body)
+            local_script_hash = simpleHash(body)
+            print("[GH] Script updated! Please reload.")
+            addNotification("[GH] Script updated! Reload required", 255, 200, 0)
+            if callback then callback(true) end
+        else
+            print("[GH] Error: Empty response from server")
+            addNotification("[GH] Script download failed!", 255, 100, 100)
+            if callback then callback(false) end
+        end
+    end)
+end
+
+local function createUpdateWindow()
+    print("[GH] Creating update window...")
+    
+    if update_window then
+        print("[GH] Removing existing window")
+        update_window:Remove()
+        update_window = nil
+    end
+    
+    print("[GH] Creating new window with " .. #updates_found .. " updates")
+    update_window = gui.Window("gh_update_window", "Grenade Helper - Updates", 300, 200, 180, 360)
+    
+    if not update_window then
+        print("[GH] ERROR: Failed to create window!")
+        return
+    end
+    
+    print("[GH] Window created successfully")
+    
+    local content_group = gui.Groupbox(update_window, "Update Status", 16, 16, 150, 0)
+    
+    gui.Text(content_group, "Update check complete!")
+    
+    for i, update in ipairs(updates_found) do
+        gui.Text(content_group, " ")
+        gui.Text(content_group, "--------------------------")
+        gui.Text(content_group, " ")
+        gui.Text(content_group, update.name)
+        gui.Text(content_group, " ")
+        gui.Text(content_group, "Status: " .. update.status)
+        gui.Text(content_group, " ")
+        
+        if update.needs_update then
+            if update.type == "data" then
+                gui.Button(content_group, "Download Data", function()
+                    print("[GH] Downloading grenade data...")
+                    downloadGrenadeData(function(success)
+                        if success and update_window then
+                            update.status = "Downloaded!"
+                            update.needs_update = false
+                            update_window:Remove()
+                            update_window = nil
+                            createUpdateWindow()
+                        end
+                    end)
+                end)
+                gui.Text(content_group, "(Reload Required)")
+            elseif update.type == "script" then
+                gui.Button(content_group, "Download Script", function()
+                    print("[GH] Downloading script...")
+                    downloadScript(function(success)
+                        if success and update_window then
+                            update.status = "Downloaded!"
+                            update.needs_update = false
+                            update_window:Remove()
+                            update_window = nil
+                            createUpdateWindow()
+                        end
+                    end)
+                end)
+                gui.Text(content_group, "(Reload Required)")
+                gui.Text(content_group, " ")
+            end
+        end
+        
+        gui.Text(content_group, "")
+    end
+    
+    gui.Text(content_group, "--------------------------")
+    gui.Text(content_group, " ")
+    
+    gui.Button(content_group, "Close Window", function()
+        print("[GH] Closing update window")
+        if update_window then
+            update_window:Remove()
+            update_window = nil
+        end
+    end)
+    
+    print("[GH] Update window setup complete")
+end
+
+local function finishUpdateCheck()
+    local has_updates = false
+    
+    for i, update in ipairs(updates_found) do
+        if update.needs_update then
+            has_updates = true
+            break
+        end
+    end
+    
+    if has_updates then
+        addNotification("[GH] Updates available!", 0, 255, 100)
+        print("[GH] Updates available!")
+    else
+        addNotification("[GH] Everything is up to date!", 0, 255, 100)
+        print("[GH] No updates available")
+    end
+    
+    createUpdateWindow()
+end
+
+local function checkForUpdates()
+    if checking_update then
+        addNotification("[GH] Already checking...", 255, 200, 0)
+        return
+    end
+    
+    checking_update = true
+    updates_found = {}
+    addNotification("[GH] Checking for updates...", 0, 200, 255)
+    
+    local checks_remaining = 2
+    
+    http.Get(GRENADE_DATA_URL, function(body)
+        if body and body ~= "" then
+            remote_data_hash = simpleHash(body)
+            
+            if local_data_hash == "" then
+                local f = file.Open(GRENADE_SAVE_FILE_NAME, "r")
+                if f then
+                    local local_data = f:Read()
+                    f:Close()
+                    local_data_hash = simpleHash(local_data)
+                end
+            end
+            
+            if remote_data_hash ~= local_data_hash then
+                table.insert(updates_found, {
+                    name = "Grenade Positions Data",
+                    status = "Update available",
+                    type = "data",
+                    needs_update = true
+                })
+            else
+                table.insert(updates_found, {
+                    name = "Grenade Positions Data",
+                    status = "Up to date",
+                    type = "data",
+                    needs_update = false
+                })
+            end
+        else
+            table.insert(updates_found, {
+                name = "Grenade Positions Data",
+                status = "Check failed",
+                type = "data",
+                needs_update = false
+            })
+        end
+        
+        checks_remaining = checks_remaining - 1
+        if checks_remaining == 0 then
+            checking_update = false
+            finishUpdateCheck()
+        end
+    end)
+    
+    http.Get(SCRIPT_URL, function(body)
+        if body and body ~= "" then
+            remote_script_hash = simpleHash(body)
+            
+            if local_script_hash == "" then
+                local f = file.Open(SCRIPT_NAME, "r")
+                if f then
+                    local local_script = f:Read()
+                    f:Close()
+                    local_script_hash = simpleHash(local_script)
+                end
+            end
+            
+            if remote_script_hash ~= local_script_hash then
+                table.insert(updates_found, {
+                    name = "Grenade Helper Script",
+                    status = "Update available",
+                    type = "script",
+                    needs_update = true
+                })
+            else
+                table.insert(updates_found, {
+                    name = "Grenade Helper Script",
+                    status = "Up to date",
+                    type = "script",
+                    needs_update = false
+                })
+            end
+        else
+            table.insert(updates_found, {
+                name = "Grenade Helper Script",
+                status = "Check failed",
+                type = "script",
+                needs_update = false
+            })
+        end
+        
+        checks_remaining = checks_remaining - 1
+        if checks_remaining == 0 then
+            checking_update = false
+            finishUpdateCheck()
+        end
+    end)
+end
+
+--------------------------------
+-- UI Configuration
+--------------------------------
+local visuals_ref = gui.Reference("VISUALS", "Local")
+local GH_GB = gui.Groupbox(visuals_ref, "Grenade Helper", 15, 0, 352, 0)
+
+local GH_ENABLED = gui.Checkbox(GH_GB, "gh.enabled", "Enable Grenade Helper", true)
+local GH_NAME_EB = gui.Editbox(GH_GB, "gh.name", "Throw Name")
+local GH_POSITION_CB = gui.Combobox(GH_GB, "gh.position", "Position Type", unpack(POSITION_TYPES))
+local GH_LAUNCH_CB = gui.Combobox(GH_GB, "gh.launch", "Launch Type", unpack(LAUNCH_TYPES))
+
+local GH_ENABLE_KB = gui.Checkbox(GH_GB, "gh.kb.enabled", "Enable Keybinds", true)
+local GH_SAVE_KB = gui.Keybox(GH_GB, "gh.kb.save", "Capture & Save", 97)
+local GH_DEL_KB = gui.Keybox(GH_GB, "gh.kb.del", "Delete Nearest", 98)
+local GH_JUMPTHROW_KB = gui.Keybox(GH_GB, "gh.kb.jumpthrow", "Jump Throw", 70)
+local GH_WALKBOT_KB = gui.Keybox(GH_GB, "gh.kb.walkbot", "Walk To Nearest", 18)
+
+local GH_VISUALS_DISTANCE_SL = gui.Slider(GH_GB, "gh.visuals.distance", "Display Distance", 800, 1, 9999)
+
+gui.Text(GH_GB, " ")
+gui.Text(GH_GB, "Colors:")
+gui.Text(GH_GB, " ")
+local CP_TEXT_NAME = gui.ColorPicker(GH_GB, "gh.color.name", "Throw Name", 255, 255, 0, 255)
+local CP_TEXT_POS = gui.ColorPicker(GH_GB, "gh.color.position", "Position Type", 150, 255, 150, 200)
+local CP_TEXT_LAUNCH = gui.ColorPicker(GH_GB, "gh.color.launch", "Launch Type", 255, 150, 150, 200)
+local CP_LINE = gui.ColorPicker(GH_GB, "gh.color.line", "Direction Line", 0, 255, 255, 220)
+local CP_BOX = gui.ColorPicker(GH_GB, "gh.color.box", "Box Color", 0, 0, 0, 255)
+local CP_FINAL = gui.ColorPicker(GH_GB, "gh.color.final", "Active Box", 0, 255, 100, 255)
+
+gui.Button(GH_GB, "Check for Updates", function()
+    checkForUpdates()
+end)
+
+--------------------------------
+-- Data Persistence
 --------------------------------
 local function parseStringifiedTable(s)
     local new_map = {}
@@ -280,7 +583,7 @@ local function convertTableToDataString(obj)
     return (#out > 0) and (table.concat(out, "\n") .. "\n") or ""
 end
 
-local function loadData()
+function loadData()
     local f = file.Open(GRENADE_SAVE_FILE_NAME, "r")
     if not f then return end
     
@@ -289,21 +592,19 @@ local function loadData()
     
     if data and data ~= "" then
         maps = parseStringifiedTable(data)
+        local_data_hash = simpleHash(data)
+        print("[GH] Loaded data from file")
     end
 end
 
 local function saveData()
-    local f = file.Open(GRENADE_SAVE_FILE_NAME, "w")
-    if not f then return end
-    
-    f:Write(convertTableToDataString(maps))
-    f:Close()
+    file.Write(GRENADE_SAVE_FILE_NAME, convertTableToDataString(maps))
 end
 
 --------------------------------
--- Selection & Rendering
+-- Throw Selection & Filtering
 --------------------------------
-local function getActiveThrows(map, me, nade_name)
+local function getActiveThrows(map, me, nade_name, max_distance)
     local list, in_range = {}, {}
     if not map then return {}, false end
     
@@ -316,12 +617,15 @@ local function getActiveThrows(map, me, nade_name)
         if should_show then
             local tpos = Vector3(t.pos.x, t.pos.y, t.pos.z)
             local d = dist3v(mpos, tpos)
-            t.distance = d
             
-            if d < THROW_RADIUS then
-                in_range[#in_range + 1] = t
-            else
-                list[#list + 1] = t
+            if d <= max_distance then
+                t.distance = d
+                
+                if d < THROW_RADIUS then
+                    in_range[#in_range + 1] = t
+                else
+                    list[#list + 1] = t
+                end
             end
         end
     end
@@ -329,7 +633,7 @@ local function getActiveThrows(map, me, nade_name)
     return #in_range > 0 and in_range or list, #in_range > 0
 end
 
-local function getClosestThrow(map, me)
+local function getClosestThrow(map, me, nade_name, max_distance)
     if not map or #map == 0 then return nil, math.huge end
     
     local mpos = get_origin_v3(me)
@@ -337,28 +641,22 @@ local function getClosestThrow(map, me)
     
     for i = 1, #map do
         local t = map[i]
-        local d = dist3v(mpos, Vector3(t.pos.x, t.pos.y, t.pos.z))
-        if d < bestDist then
-            best, bestDist = t, d
+        local should_consider = t.nade == nade_name or t.nade == "auto"
+        
+        if should_consider then
+            local d = dist3v(mpos, Vector3(t.pos.x, t.pos.y, t.pos.z))
+            if d < bestDist and d <= max_distance then
+                best, bestDist = t, d
+            end
         end
     end
     
     return best, bestDist
 end
 
-local function drawText(x, y, text, r, g, b, a)
-    draw.Color(0, 0, 0, a)
-    for dx = -1, 1 do
-        for dy = -1, 1 do
-            if dx ~= 0 or dy ~= 0 then
-                draw.Text(x + dx, y + dy, text)
-            end
-        end
-    end
-    draw.Color(r, g, b, a)
-    draw.Text(x, y, text)
-end
-
+--------------------------------
+-- Rendering
+--------------------------------
 local function showNadeThrows()
     local me = entities.GetLocalPlayer()
     if not me then return end
@@ -369,7 +667,8 @@ local function showNadeThrows()
     local current_throws = maps[current_map_name]
     if not current_throws then return end
     
-    local list, within = getActiveThrows(current_throws, me, weapon_name)
+    local max_distance = GH_VISUALS_DISTANCE_SL:GetValue()
+    local list, within = getActiveThrows(current_throws, me, weapon_name, max_distance)
     if not list then return end
     
     local nr, ng, nb, na = CP_TEXT_NAME:GetValue()
@@ -379,15 +678,8 @@ local function showNadeThrows()
     local br, bg, bb, ba = CP_BOX:GetValue()
     local fr, fg, fb, fa = CP_FINAL:GetValue()
     
-    local max_distance = GH_VISUALS_DISTANCE_SL:GetValue()
-    
     for i = 1, #list do
         local t = list[i]
-        
-        if t.distance and t.distance > max_distance then
-            goto continue
-        end
-        
         local pos = Vector3(t.pos.x, t.pos.y, t.pos.z)
         local is_crouching = t.position:find("crouch") ~= nil
         local zoff = is_crouching and 46 or 64
@@ -395,11 +687,11 @@ local function showNadeThrows()
         local fwd = angles_to_forward(axn, ayn)
         
         local ahead = Vector3(pos.x + fwd.x * 10, pos.y + fwd.y * 10, pos.z)
-        local s1x, s1y = W2S(ahead)
+        local s1x, s1y = client.WorldToScreen(ahead)
         
         if within then
             local target = GetThrowPositionV3(pos, axn, ayn, zoff)
-            local dx, dy = W2S(target)
+            local dx, dy = client.WorldToScreen(target)
             
             if dx and dy then
                 draw.Color(fr, fg, fb, fa)
@@ -407,31 +699,39 @@ local function showNadeThrows()
                 draw.Color(lnr, lng, lnb, lna)
                 draw.Line(dx, dy, screen_w/2, screen_h/2)
                 
+                if t.name then
+                    local ntw, nth = draw.GetTextSize(t.name)
+                    draw.Color(nr, ng, nb, na)
+                    draw.TextShadow(dx - ntw/2, dy - nth - 10, t.name)
+                end
+                
                 local pos_text = "[" .. t.position .. "]"
                 local ptw, pth = draw.GetTextSize(pos_text)
-                drawText(dx - ptw/2, dy + 12, pos_text, pr, pg, pb, pa)
+                draw.Color(pr, pg, pb, pa)
+                draw.TextShadow(dx - ptw/2, dy + 12, pos_text)
                 
                 local launch_text = "[" .. t.launch .. "]"
-                local ltw, lth = draw.GetTextSize(launch_text)
-                drawText(dx - ltw/2, dy + 12 + pth + 2, launch_text, lr, lg, lb, la)
+                local ltw = draw.GetTextSize(launch_text)
+                draw.Color(lr, lg, lb, la)
+                draw.TextShadow(dx - ltw/2, dy + 12 + pth + 2, launch_text)
             end
         end
         
-        local cx, cy = W2S(pos)
+        local cx, cy = client.WorldToScreen(pos)
         if not cx or not cy then goto continue end
         
         local half = THROW_RADIUS / 2
         local ul = Vector3(pos.x - half, pos.y - half, pos.z)
         local bl = Vector3(pos.x - half, pos.y + half, pos.z)
         local ur = Vector3(pos.x + half, pos.y - half, pos.z)
-        local br = Vector3(pos.x + half, pos.y + half, pos.z)
+        local br_pos = Vector3(pos.x + half, pos.y + half, pos.z)
         
-        local ulx, uly = W2S(ul)
-        local blx, bly = W2S(bl)
-        local urx, ury = W2S(ur)
-        local brx, bry = W2S(br)
+        local ulx, uly = client.WorldToScreen(ul)
+        local blx, bly = client.WorldToScreen(bl)
+        local urx, ury = client.WorldToScreen(ur)
+        local brx, bry = client.WorldToScreen(br_pos)
         
-        local alpha = max_distance > 0 and clamp((1 - t.distance / max_distance) * 255, 50, 255) or 255
+        local alpha = clamp((1 - t.distance / max_distance) * 255, 50, 255)
         
         draw.Color(br, bg, bb, alpha)
         if ulx and uly and blx and bly and urx and ury and brx and bry then
@@ -445,7 +745,8 @@ local function showNadeThrows()
         
         if t.name then
             local tw, th = draw.GetTextSize(t.name)
-            drawText(cx - tw/2, cy - th - 4, t.name, nr, ng, nb, alpha)
+            draw.Color(nr, ng, nb, alpha)
+            draw.TextShadow(cx - tw/2, cy - th - 4, t.name)
         end
         
         if s1x and s1y then
@@ -458,12 +759,106 @@ local function showNadeThrows()
 end
 
 --------------------------------
+-- Walkbot System
+--------------------------------
+local function moveToPosition(cmd, me, target_pos, dist)
+    if not cmd or not me or not target_pos then return end
+    
+    local origin = get_origin_v3(me)
+    local move_dir = Vector3(target_pos.x - origin.x, target_pos.y - origin.y, 0)
+    
+    if move_dir.x == 0 and move_dir.y == 0 then return end
+    
+    local dir_ang = move_dir:Angles()
+    local view_ang = engine.GetViewAngles()
+    local yaw_diff = dir_ang.y - view_ang.y
+    
+    while yaw_diff > 180 do yaw_diff = yaw_diff - 360 end
+    while yaw_diff < -180 do yaw_diff = yaw_diff + 360 end
+    
+    local yaw_rad = math.rad(yaw_diff)
+    cmd:SetForwardMove(math.cos(yaw_rad))
+    cmd:SetSideMove(math.sin(yaw_rad))
+    
+    local buttons = bit.band(cmd:GetButtons() or 0, bit.bnot(bit.bor(IN_FORWARD, IN_BACK, IN_MOVELEFT, IN_MOVERIGHT)))
+    local tick = globals.TickCount()
+    
+    if dist > 45 then
+        buttons = bit.bor(buttons, IN_FORWARD, IN_MOVELEFT)
+    else
+        if (tick % 3) == 0 then
+            buttons = bit.bor(buttons, IN_FORWARD, IN_MOVELEFT)
+        else
+            cmd:SetForwardMove(0)
+            cmd:SetSideMove(0)
+        end
+    end
+    
+    cmd:SetButtons(buttons)
+end
+
+local function walkbotNavigate(cmd, me, target_pos)
+    if not target_pos or not cmd or not me then return false end
+    
+    local my_pos = get_origin_v3(me)
+    local dist = dist3v(my_pos, target_pos)
+    
+    if dist < WALKBOT_STOP_DISTANCE then
+        cmd:SetForwardMove(0)
+        cmd:SetSideMove(0)
+        addNotification("[GH] Arrived at position!", 0, 255, 100)
+        return true
+    end
+    
+    if globals.TickCount() - walkbot_start_time > WALKBOT_TIMEOUT then
+        addNotification("[GH] Walkbot timeout - cancelled", 255, 100, 0)
+        return true
+    end
+    
+    moveToPosition(cmd, me, target_pos, dist)
+    return false
+end
+
+local function startWalkbot(me)
+    if not current_map_name or not maps[current_map_name] then
+        addNotification("[GH] No throws on this map", 255, 100, 100)
+        return
+    end
+    
+    local weapon_name = GetActiveGrenadeName()
+    if not weapon_name then
+        addNotification("[GH] No grenade equipped", 255, 100, 0)
+        return
+    end
+    
+    local max_distance = GH_VISUALS_DISTANCE_SL:GetValue()
+    local best, dist = getClosestThrow(maps[current_map_name], me, weapon_name, max_distance)
+    
+    if not best then
+        addNotification("[GH] No throws found in range", 255, 100, 100)
+        return
+    end
+    
+    walkbot_target = Vector3(best.pos.x, best.pos.y, best.pos.z)
+    walkbot_target_nade = weapon_name
+    walkbot_active = true
+    walkbot_start_time = globals.TickCount()
+    
+    addNotification("[GH] Walking to: " .. (best.name or "position"), 0, 255, 255)
+end
+
+--------------------------------
 -- Actions
 --------------------------------
 local function doAdd(cmd)
     local me = entities.GetLocalPlayer()
     if not me or not me:IsAlive() then
         addNotification("[GH] Player not alive", 255, 100, 100)
+        return
+    end
+    
+    if get_velocity(me) > 0 then
+        addNotification("[GH] Must be standing still", 255, 100, 0)
         return
     end
     
@@ -485,15 +880,13 @@ local function doAdd(cmd)
     local mpos = get_origin_v3(me)
     
     local ax, ay = 0, 0
-    if engine.GetViewAngles then
-        ax, ay = to_num2(engine.GetViewAngles())
-    elseif cmd and cmd.viewangles then
-        ax, ay = to_num2(cmd.viewangles)
+    if cmd and cmd:GetViewAngles() then
+        ax, ay = to_num2(cmd:GetViewAngles())
     end
     
     local nade = GetActiveGrenadeName() or "auto"
     
-    local entry = {
+    table.insert(maps[current_map_name], {
         name = name,
         position = position,
         launch = launch,
@@ -501,11 +894,9 @@ local function doAdd(cmd)
         pos = {x = mpos.x, y = mpos.y, z = mpos.z},
         ax = ax,
         ay = ay
-    }
+    })
     
-    table.insert(maps[current_map_name], entry)
     saveData()
-    
     addNotification("[GH] Saved: " .. name .. " [" .. position .. "] [" .. launch .. "]", 0, 255, 100)
 end
 
@@ -515,7 +906,12 @@ local function doDel(me)
         return
     end
     
-    local best = getClosestThrow(maps[current_map_name], me)
+    local weapon_name = GetActiveGrenadeName()
+    if not weapon_name then weapon_name = "auto" end
+    
+    local max_distance = GH_VISUALS_DISTANCE_SL:GetValue()
+    local best = getClosestThrow(maps[current_map_name], me, weapon_name, max_distance)
+    
     if not best then
         addNotification("[GH] No throws found", 255, 100, 100)
         return
@@ -533,21 +929,23 @@ local function doDel(me)
 end
 
 --------------------------------
--- Event Handler
+-- Event Handlers
 --------------------------------
 local function gameEventHandler(event)
     if not GH_ENABLED:GetValue() then return end
     
     local event_name = event:GetName()
     
-    if event_name == "round_start" then
-        -- Reset jumpthrow on round start
+    if event_name == "round_start" or event_name == "round_end" or event_name == "player_death" then
         jumpthrow_stage = 0
+        walkbot_active = false
+        walkbot_target = nil
+        walkbot_target_nade = nil
     end
 end
 
 --------------------------------
--- Callbacks
+-- Main Callbacks
 --------------------------------
 local function drawEventHandler()
     screen_w, screen_h = draw.GetScreenSize()
@@ -557,8 +955,6 @@ local function drawEventHandler()
     local active_map = engine.GetMapName()
     if not active_map or active_map == "" then return end
     
-    if not maps then maps = {} end
-    
     local map_key = canon_mapname(active_map)
     if map_key == "" then return end
     
@@ -567,31 +963,61 @@ local function drawEventHandler()
         loadData()
     end
     
-    if not maps[current_map_name] then
-        maps[current_map_name] = {}
-    end
+    maps[current_map_name] = maps[current_map_name] or {}
     
     showNadeThrows()
     drawNotifications()
+    
+    if walkbot_active and walkbot_target then
+        local me = entities.GetLocalPlayer()
+        if me then
+            local my_pos = get_origin_v3(me)
+            local dist = dist3v(my_pos, walkbot_target)
+            
+            draw.Color(0, 255, 255, 255)
+            draw.TextShadow(10, screen_h - 50, "[GH] Walking to position...")
+            draw.TextShadow(10, screen_h - 35, string.format("Distance: %.1f units", dist))
+            draw.TextShadow(10, screen_h - 20, "(Press ALT again to cancel)")
+        end
+    end
 end
 
 local function moveEventHandler(cmd)
     if not GH_ENABLED:GetValue() then return end
     
     local me = entities.GetLocalPlayer()
-    if not me or not me:IsAlive() then return end
+    if not me or not me:IsAlive() then 
+        walkbot_active = false
+        walkbot_target = nil
+        walkbot_target_nade = nil
+        return 
+    end
     
-    -- Ensure map is loaded
     if not current_map_name or not maps or not maps[current_map_name] then
         return
     end
     
-    -- Tick counter overflow protection
-    if last_action and last_action > globals.TickCount() then
+    if last_action > globals.TickCount() then
         last_action = globals.TickCount()
     end
     
-    -- Jump throw
+    if walkbot_active and walkbot_target then
+        local current_nade = GetActiveGrenadeName()
+        if current_nade ~= walkbot_target_nade then
+            walkbot_active = false
+            walkbot_target = nil
+            walkbot_target_nade = nil
+            addNotification("[GH] Walkbot cancelled - wrong grenade", 255, 150, 0)
+        else
+            local completed = walkbotNavigate(cmd, me, walkbot_target)
+            if completed then
+                walkbot_active = false
+                walkbot_target = nil
+                walkbot_target_nade = nil
+            end
+        end
+    end
+    
     if GH_JUMPTHROW_KB:GetValue() ~= 0 then
         if input.IsButtonPressed(GH_JUMPTHROW_KB:GetValue()) and jumpthrow_stage == 0 then
             jumpthrow_stage = 1
@@ -620,8 +1046,9 @@ local function moveEventHandler(cmd)
     
     local add_key = GH_SAVE_KB:GetValue()
     local del_key = GH_DEL_KB:GetValue()
+    local walkbot_key = GH_WALKBOT_KB:GetValue()
     
-    if add_key == 0 and del_key == 0 then return end
+    if add_key == 0 and del_key == 0 and walkbot_key == 0 then return end
     
     if add_key ~= 0 and input.IsButtonDown(add_key) and globals.TickCount() - last_action > GH_ACTION_COOLDOWN then
         last_action = globals.TickCount()
@@ -632,23 +1059,67 @@ local function moveEventHandler(cmd)
         last_action = globals.TickCount()
         doDel(me)
     end
+    
+    if walkbot_key ~= 0 and input.IsButtonDown(walkbot_key) and globals.TickCount() - last_action > GH_ACTION_COOLDOWN then
+        last_action = globals.TickCount()
+        
+        if walkbot_active then
+            walkbot_active = false
+            walkbot_target = nil
+            walkbot_target_nade = nil
+            addNotification("[GH] Walkbot cancelled", 255, 150, 0)
+        else
+            startWalkbot(me)
+        end
+    end
 end
 
--- Load initial data
-loadData()
+--------------------------------
+-- Initialization
+--------------------------------
+local function initializeData()
+    local f = file.Open(GRENADE_SAVE_FILE_NAME, "r")
+    
+    if f then
+        local data = f:Read()
+        f:Close()
+        if data and data ~= "" then
+            local_data_hash = simpleHash(data)
+            maps = parseStringifiedTable(data)
+            print("[GH] Loaded grenade data from local file")
+        end
+    end
+    
+    local script_f = file.Open(SCRIPT_NAME, "r")
+    if script_f then
+        local script_data = script_f:Read()
+        script_f:Close()
+        if script_data and script_data ~= "" then
+            local_script_hash = simpleHash(script_data)
+        end
+    end
+end
 
--- Register callbacks
+initializeData()
+
+client.AllowListener("round_start")
+client.AllowListener("round_end")
+client.AllowListener("player_death")
+
 callbacks.Register("FireGameEvent", "GH_EVENT", gameEventHandler)
 callbacks.Register("CreateMove", "GH_MOVE", moveEventHandler)
 callbacks.Register("Draw", "GH_DRAW", drawEventHandler)
 
 print("========================================")
-print("[Grenade Helper V6] Loaded!")
+print("[Grenade Helper V6 - Complete] Loaded!")
 print("========================================")
 print("Credits:")
 print("  - ShadyRetard (Grenade Helper base)")
 print("  - Carter Poe & Agentsix1 (V6 API)")
-print("  - Ginette (Fix & Reconstruction with AI)")
+print("  - Ginette (Optimization & AI)")
 print("========================================")
-print("numpad 1 = Save | numpad 2 = Delete | F = Jumpthrow")
-print("========================================")
+print("Controls:")
+print("  Numpad 1 = Save Position")
+print("  Numpad 2 = Delete Nearest")
+print("  F = Jump Throw")
+print("  ALT = Walk To Nearest Position")
